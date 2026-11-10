@@ -1,0 +1,319 @@
+{
+  "name": "Stock analysis workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        16
+      ],
+      "id": "e95e2732-8bee-42fe-83ad-3d4a13f395ed",
+      "name": "Telegram Trigger",
+      "webhookId": "a1a466f3-88a2-4b76-907e-5e8ca89c0c60",
+      "credentials": {
+        "telegramApi": {
+          "id": "d2pZhcSRHaUARnZ8",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        752,
+        448
+      ],
+      "id": "ed414dbf-c5e5-44f4-8c05-455274547562",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "8mkKZ9KWcaQbvKRX",
+          "name": "OpenRouter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Telegram Trigger').item.json.message.chat.id }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        944,
+        432
+      ],
+      "id": "3a1c847f-6610-4e57-a8e4-51e081e3ff48",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $('Telegram Trigger').first().json.message.text.toUpperCase();\nconst match = text.match(/\\b[A-Z]{1,5}\\b/);\nconst ticker = match ? match[0] : 'AAPL';\nreturn [{ json: { ticker } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        16
+      ],
+      "id": "a6dbfefe-503f-471b-b429-52ebb654b3b5",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/v8/finance/chart/{{ $('Code in JavaScript').first().json.ticker }}?range=6mo&interval=1d\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agen",
+              "value": "Mozilla/5.0"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        400,
+        16
+      ],
+      "id": "18b05e73-2bd6-4bd5-87f1-59dea1dbcabf",
+      "name": "Get Price - Yahoo"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code Node — Name: Build Chart Data (v3 — SIMPLE)\n// Place: Get Price - Yahoo → Build Chart Data\n// This node MUST be connected directly after Get Price - Yahoo.\n// It reads ONLY $json (its own input). No $('...') at all.\n\n// 1. Yahoo data — sudhu ei node-er input theke ($json)\nconst priceJson = $json;\n\nconst result = priceJson && priceJson.chart && priceJson.chart.result\n  ? priceJson.chart.result[0]\n  : null;\n\nif (!result || !Array.isArray(result.timestamp)) {\n  throw new Error('Yahoo price data not found in $json — check that this Code node is connected directly after Get Price - Yahoo, and that Get Price - Yahoo is green with JSON output.');\n}\n\nconst timestamps = result.timestamp || [];\nconst closesRaw = (result.indicators\n  && result.indicators.quote\n  && result.indicators.quote[0]\n  && result.indicators.quote[0].close) || [];\n\n// 2. Ticker + currency — Yahoo meta theke, onno node lagbe na\nconst ticker = (result.meta && result.meta.symbol) || 'AAPL';\nconst currency = (result.meta && result.meta.currency) || 'USD';\nconst currencySymbol = currency === 'USD' ? '$' : currency + ' ';\n\n// 3. null close bad dao, date + price jora rakho\nconst points = [];\nfor (let i = 0; i < timestamps.length; i++) {\n  const close = closesRaw[i];\n  if (typeof close !== 'number' || isNaN(close)) continue;\n  points.push({\n    date: new Date(timestamps[i] * 1000).toISOString().slice(0, 10),\n    close: Math.round(close * 100) / 100,\n  });\n}\n\nif (points.length < 55) {\n  throw new Error('Price point kom (' + points.length + ' ta) — Get Price - Yahoo URL-e range=6mo thik ache kina dekho.');\n}\n\n// 4. Sesh 60 din nao\nconst last60 = points.slice(-60);\n\n// 5. 50-Day Average\nconst ma50 = last60.map((p, i) => {\n  if (i < 49) return null;\n  let sum = 0;\n  for (let j = i - 49; j <= i; j++) sum += last60[j].close;\n  return Math.round((sum / 50) * 100) / 100;\n});\n\n// 6. Caption-er hisab\nconst currentPrice = last60[last60.length - 1].close;\nconst firstPrice = last60[0].close;\nconst changePct = Math.round(((currentPrice - firstPrice) / firstPrice) * 1000) / 10;\nconst changeSign = changePct >= 0 ? '+' : '';\n\n// 7. QuickChart config\nconst chartConfig = {\n  type: 'line',\n  data: {\n    labels: last60.map((p) => p.date),\n    datasets: [\n      {\n        label: 'Close Price',\n        data: last60.map((p) => p.close),\n        borderColor: 'rgb(37, 99, 235)',\n        fill: false,\n        borderWidth: 2,\n        pointRadius: 0,\n      },\n      {\n        label: '50-Day Average',\n        data: ma50,\n        borderColor: 'rgb(249, 115, 22)',\n        fill: false,\n        borderWidth: 2,\n        borderDash: [5, 5],\n        pointRadius: 0,\n      },\n    ],\n  },\n  options: {\n    title: { display: true, text: ticker + ' — Last 60 Trading Days', fontSize: 16 },\n    legend: { display: true, position: 'top' },\n    scales: {\n      xAxes: [{ ticks: { maxTicksLimit: 8 } }],\n      yAxes: [{ ticks: { beginAtZero: false } }],\n    },\n  },\n};\n\n// 8. QuickChart POST body\nconst quickChartBody = {\n  backgroundColor: 'white',\n  width: 800,\n  height: 400,\n  format: 'png',\n  chart: chartConfig,\n};\n\n// 9. Telegram caption\nconst captionBase = ticker + ' — 60-Day Trend | Price: ' + currencySymbol + currentPrice\n  + ' | 60d Change: ' + changeSign + changePct + '%';\n\nreturn [{\n  json: {\n    ticker,\n    currency,\n    currentPrice,\n    changePct60d: changePct,\n    startDate: last60[0].date,\n    endDate: last60[last60.length - 1].date,\n    pointsUsed: last60.length,\n    captionBase,\n    quickChartBody,\n    labels: last60.map((p) => p.date),\n    closes: last60.map((p) => p.close),\n    ma50,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        16
+      ],
+      "id": "18d8e699-c06b-48b8-9ce1-3a05cfff8662",
+      "name": "Build Chart Data"
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "binaryData": true,
+        "binaryPropertyName": "chart.png",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1248,
+        16
+      ],
+      "id": "f37342b2-9a6a-4188-8e48-bb03f299eaa5",
+      "name": "Send a photo message",
+      "webhookId": "71123e6f-cd4b-462b-a1a0-54befbf1a605",
+      "credentials": {
+        "telegramApi": {
+          "id": "d2pZhcSRHaUARnZ8",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyse this stock from its 60-day chart data:\n\nTicker: {{ $('Build Chart Data').first().json.ticker }}\nPeriod: {{ $('Build Chart Data').first().json.startDate }} to {{ $('Build Chart Data').first().json.endDate }}\nCurrent Price: ${{ $('Build Chart Data').first().json.currentPrice }}\n60-Day Change: {{ $('Build Chart Data').first().json.changePct60d }}%\n50-Day Average values (last 60 days, first 49 are null): {{ $('Build Chart Data').first().json.ma50.join(', ') }}\nClose Prices (last 60 trading days, oldest to newest): {{ $('Build Chart Data').first().json.closes.join(', ') }}\nDates: {{ $('Build Chart Data').first().json.labels.join(', ') }}\n\nGive me your Verdict, Confidence, reasons, and risk — from this chart data only.\n",
+        "options": {
+          "systemMessage": "You are a chart analyst. Analyse ONLY the 60-day chart data given in the user message. Never invent prices, dates, or news. Use only the numbers given.\n\nAnalyse:\n1. Price & Trend — current price, 60-day change, last 10 days direction\n2. Price vs 50-Day Average — above or below, by how much %\n3. 60-Day High / Low — how close is the price to the high or low\n4. Momentum — is the trend speeding up, slowing down, or reversing in the last 10 days\n\nThen give:\n- Verdict: Bullish / Neutral / Bearish\n- Confidence: 0-100%\n- Time Horizon: Short-term (next 30 days)\n- 3 reasons for the verdict\n- 1 reason it could be wrong\n\nKeep it under 500 words, plain text, no tables, no **bold**.\nEnd with: \"This is educational analysis only, not investment advice.\"\nNever give a direct Buy or Sell instruction.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        800,
+        208
+      ],
+      "id": "b9e18da7-d0cf-4636-9359-45414a3344a0",
+      "name": "AI Agent - Chart Analyst"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.output }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1296,
+        208
+      ],
+      "id": "0ad03f51-a2e5-4231-b3f4-7e34fc4596c5",
+      "name": "Send a text message",
+      "webhookId": "0f362507-f095-45c8-9443-787c0ff0bd5b",
+      "credentials": {
+        "telegramApi": {
+          "id": "d2pZhcSRHaUARnZ8",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://quickchart.io/chart",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.quickChartBody) }}\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "chart.png"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        912,
+        16
+      ],
+      "id": "ff7e770a-baf8-4f6a-a447-dcf1037247b3",
+      "name": "Get Chart data image"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent - Chart Analyst",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent - Chart Analyst",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Get Price - Yahoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Price - Yahoo": {
+      "main": [
+        [
+          {
+            "node": "Build Chart Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Chart Data": {
+      "main": [
+        [
+          {
+            "node": "Get Chart data image",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AI Agent - Chart Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a photo message": {
+      "main": [
+        []
+      ]
+    },
+    "AI Agent - Chart Analyst": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Chart data image": {
+      "main": [
+        [
+          {
+            "node": "Send a photo message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "0ce8abc8-545d-422f-96ba-8c746936633e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8016af70e2772351af8e46a43445b221929918fc07cf4586ff34bf50bc27e012"
+  },
+  "nodeGroups": [],
+  "id": "xXzcpD1f0aXprRuZ",
+  "tags": []
+}
